@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================
-#   INFINITE VM MANAGER
+# Enhanced Multi-VM Manager
 # =============================
 
 display_header() {
@@ -11,9 +11,9 @@ display_header() {
 ========================================================================
          _____ _   _ ______ ______ _  _  _____ _______  ______ 
         |_   _| \ | |  ____||_   _| \ | |_   _|__   __||  ____|
-          | | |  \| | |__     | | |  \| | | |    | |   | |__   
-          | | | . ` |  __|    | | | . ` | | |    | |   |  __|   
-         _| |_| |\  | |      _| |_| |\  |_| |_   | |   | |____ 
+          | | |  \| | |__     | | |  \| | | |    | |   | |__
+          | | | . ` |  __|    | | | . ` | | |    | |   |  __|
+         _| |_| |\  | |      _| |_| |\  |_| |_   | |   | |____
         |_____|_| \_|_|     |_____|_| \_|_____|  |_|   |______|
                                                                       
                           POWERED BY INFINITE
@@ -22,166 +22,181 @@ EOF
     echo
 }
 
-log() {
-    case $1 in
-        INFO)    echo -e "\033[1;34m[INFO]\033[0m $2";;
-        WARN)    echo -e "\033[1;33m[WARN]\033[0m $2";;
-        ERROR)   echo -e "\033[1;31m[ERROR]\033[0m $2";;
-        SUCCESS) echo -e "\033[1;32m[SUCCESS]\033[0m $2";;
-        INPUT)   echo -e "\033[1;36m[INPUT]\033[0m $2";;
+print_status() {
+    local type=$1
+    local message=$2
+    
+    case $type in
+        "INFO")    echo -e "\033[1;34m[INFO]\033[0m $message"    ;;
+        "WARN")    echo -e "\033[1;33m[WARN]\033[0m $message"    ;;
+        "ERROR")   echo -e "\033[1;31m[ERROR]\033[0m $message"   ;;
+        "SUCCESS") echo -e "\033[1;32m[SUCCESS]\033[0m $message" ;;
+        "INPUT")   echo -e "\033[1;36m[INPUT]\033[0m $message"   ;;
+        *)         echo "[$type] $message"                       ;;
     esac
+}
+
+validate_input() {
+    local type=$1
+    local value=$2
+    
+    case $type in
+        "number")
+            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+                print_status "ERROR" "Must be a number"
+                return 1
+            fi
+            ;;
+        "size")
+            if ! [[ "$value" =~ ^[0-9]+[GgMm]$ ]]; then
+                print_status "ERROR" "Must be a size with unit (e.g., 100G, 512M)"
+                return 1
+            fi
+            ;;
+        "name")
+            if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+                print_status "ERROR" "VM name can only contain letters, numbers, hyphens, and underscores"
+                return 1
+            fi
+            ;;
+    esac
+    return 0
 }
 
 check_dependencies() {
     local deps=("qemu-system-x86_64" "virt-install" "wget" "cloud-localds" "genisoimage" "qemu-img")
-    local missing=()
-
-    for d in "${deps[@]}"; do
-        if ! command -v "$d" &>/dev/null; then
-            missing+=("$d")
+    local missing_deps=()
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing_deps+=("$dep")
         fi
     done
-
-    if (( ${#missing[@]} > 0 )); then
-        log ERROR "Missing dependencies: ${missing[*]}"
-        log INFO  "Install them using:"
-        echo "sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage qemu-utils -y"
+    
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
+        print_status "INFO" "On Ubuntu/Debian: sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage"
         exit 1
     fi
 }
 
 cleanup() {
-    rm -f user-data meta-data 2>/dev/null || true
+    if [ -f "user-data" ]; then rm -f "user-data"; fi
+    if [ -f "meta-data" ]; then rm -f "meta-data"; fi
 }
 
-# ---------------------------------------------------------
-# FIXED STATIC MICROSOFT ISO LINKS (NEVER 404)
-# ---------------------------------------------------------
-WIN10_ISO="https://archive.org/download/windows-10-22h2-english-x64/Win10_22H2_English_x64.iso"
-WIN2019_ISO="https://archive.org/download/windows-server-2019-english/Windows_Server_2019_Updated.iso"
-
-# ---------------------------------------------------------
-# OS Definitions
-# ---------------------------------------------------------
+# OS list for menu
 declare -A OS_OPTIONS=(
-    ["Windows 10"]="windows|win10|$WIN10_ISO|win10"
-    ["Windows Server"]="windows|winserver|$WIN2019_ISO|win2k19"
-    ["Ubuntu 22.04"]="linux|ubuntu|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22"
-    ["Ubuntu 24.04"]="linux|ubuntu|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24"
-    ["Debian 12"]="linux|debian|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12"
+    ["Ubuntu 22.04"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
+    ["Ubuntu 24.04"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
+    ["Debian 12"]="debian|bookworm|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12|debian|debian"
+    ["Windows 10"]="windows|win10|https://archive.org/download/windows-10-22h2-english-x64/Win10_22H2_English_x64.iso|win10|Administrator|Admin123"
+    ["Windows Server"]="windows|winserver|https://archive.org/download/windows-server-2019_202402/Windows_Server_2019_Updated.iso|win2k19|Administrator|Admin123"
 )
 
-VM_DIR="$HOME/vms"
+VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
 
 main_menu() {
     display_header
-
-    log INFO "Select an OS to set up:"
-    local list=()
+    
+    print_status "INFO" "Select an OS to set up:"
+    local options=()
     local i=1
-
     for name in "${!OS_OPTIONS[@]}"; do
         echo "  $i) $name"
-        list[$i]="$name"
+        options[$i]="$name"
         ((i++))
     done
 
-    read -rp "$(log INPUT "Enter choice 1-5: ")" option
-    OS_NAME="${list[$option]}"
-
-    if [[ -z "$OS_NAME" ]]; then
-        log ERROR "Invalid option"
+    read -p "$(print_status "INPUT" "Enter choice 1-${#options[@]}: ")" opt
+    if ! [[ "$opt" =~ ^[0-9]+$ ]] || [ "$opt" -lt 1 ] || [ "$opt" -gt ${#options[@]} ]; then
+        print_status "ERROR" "Invalid option"
         exit 1
     fi
 
-    IFS='|' read -r TYPE DISTRO IMG_URL VARIANT <<< "${OS_OPTIONS[$OS_NAME]}"
+    NAME="${options[$opt]}"
+    IFS='|' read -r TYPE CODENAME IMG_URL VARIANT DEFAULT_USER DEFAULT_PASS <<< "${OS_OPTIONS[$NAME]}"
 
-    read -rp "$(log INPUT "VM Name: ")" VM_NAME
-    read -rp "$(log INPUT "Memory (MB): ")" MEM
-    read -rp "$(log INPUT "CPU count: ")" CPUS
-    read -rp "$(log INPUT "Disk size (e.g., 40G): ")" DISK
+    # Ask for VM specifics
+    read -p "$(print_status "INPUT" "VM Name: ")" VM_NAME
+    read -p "$(print_status "INPUT" "Memory (MB): ")" MEMORY
+    read -p "$(print_status "INPUT" "CPU count: ")" CPUS
+    read -p "$(print_status "INPUT" "Disk size (e.g., 40G): ")" DISK_SIZE
 
-    VM_DISK="$VM_DIR/$VM_NAME.qcow2"
+    validate_input number "$MEMORY" || exit 1
+    validate_input number "$CPUS"    || exit 1
+    validate_input size   "$DISK_SIZE"|| exit 1
+    validate_input name   "$VM_NAME"  || exit 1
 
-    # ------------------------------
-    # Linux Cloud Images
-    # ------------------------------
-    if [[ "$TYPE" == "linux" ]]; then
+    IMG_FILE="$VM_DIR/$VM_NAME.img"
+    SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
 
-        log INFO "Downloading cloud image..."
-        wget -O "$VM_DISK" "$IMG_URL"
+    if [[ "$TYPE" == "ubuntu" || "$TYPE" == "debian" ]]; then
+        print_status "INFO" "Using cloud-image: $IMG_URL"
+        wget -O "$IMG_FILE" "$IMG_URL"
+        print_status "INFO" "Resizing disk image to $DISK_SIZE"
+        qemu-img resize "$IMG_FILE" "$DISK_SIZE"
 
-        log INFO "Resizing image..."
-        qemu-img resize "$VM_DISK" "$DISK"
-
-        # CLOUD INIT
         cat > user-data <<EOF
 #cloud-config
 hostname: $VM_NAME
 ssh_pwauth: true
 disable_root: false
 users:
-  - name: ubuntu
+  - name: ${DEFAULT_USER}
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    passwd: $(openssl passwd -6 "infinite")
+    passwd: $(openssl passwd -6 "$DEFAULT_PASS")
 chpasswd:
   list: |
-    root:infinite
-    ubuntu:infinite
+    root:$DEFAULT_PASS
+    ${DEFAULT_USER}:$DEFAULT_PASS
   expire: false
 EOF
 
-        echo "instance-id: iid-$VM_NAME" > meta-data
+        cat > meta-data <<EOF
+instance-id: iid-$VM_NAME
+local-hostname: $VM_NAME
+EOF
 
-        CLOUD_SEED="$VM_DIR/$VM_NAME-seed.iso"
-        genisoimage -output "$CLOUD_SEED" -volid cidata -joliet -rock user-data meta-data
+        genisoimage -output "$SEED_FILE" -volid cidata -joliet -rock user-data meta-data
 
-        log INFO "Launching Linux VM..."
+        print_status "INFO" "Launching VM (Linux Cloud-Init)"
         virt-install \
-            --name "$VM_NAME" \
-            --memory "$MEM" \
-            --vcpus "$CPUS" \
-            --disk "file=$VM_DISK,format=qcow2,bus=virtio" \
-            --disk "$CLOUD_SEED,device=cdrom" \
-            --os-variant "$VARIANT" \
-            --graphics none \
-            --network network=default,model=virtio \
-            --noautoconsole
+          --name "$VM_NAME" \
+          --memory "$MEMORY" \
+          --vcpus "$CPUS" \
+          --disk "file=$IMG_FILE,format=qcow2,bus=virtio" \
+          --disk "file=$SEED_FILE,format=raw,if=virtio,device=cdrom" \
+          --os-variant "$VARIANT" \
+          --network bridge=br0,model=virtio \
+          --graphics vnc,listen=0.0.0.0 \
+          --noautoconsole
 
-        log SUCCESS "Linux VM created successfully!"
+        print_status "SUCCESS" "VM $VM_NAME created (type: $NAME)"
         exit 0
-    fi
 
-    # ------------------------------
-    # Windows (Terminal-only mode)
-    # ------------------------------
-    if [[ "$TYPE" == "windows" ]]; then
-        log INFO "Downloading Windows ISO..."
-
-        ISO_PATH="$VM_DIR/$VM_NAME.iso"
-        wget -O "$ISO_PATH" "$IMG_URL"
-
-        log INFO "Creating Windows disk image..."
-        qemu-img create -f qcow2 "$VM_DISK" "$DISK"
-
-        log INFO "Launching Windows installation..."
-
+    elif [[ "$TYPE" == "windows" ]]; then
+        print_status "INFO" "Using ISO: $IMG_URL"
+        wget -O "$VM_DIR/$VM_NAME.iso" "$IMG_URL"
         virt-install \
-            --name "$VM_NAME" \
-            --memory "$MEM" \
-            --vcpus "$CPUS" \
-            --disk "file=$VM_DISK,format=qcow2,bus=virtio" \
-            --cdrom "$ISO_PATH" \
-            --graphics none \
-            --network network=default,model=virtio \
-            --os-variant "$VARIANT" \
-            --noautoconsole
+          --name "$VM_NAME" \
+          --memory "$MEMORY" \
+          --vcpus "$CPUS" \
+          --disk "file=$VM_DIR/$VM_NAME.qcow2,format=qcow2,bus=virtio" \
+          --cdrom "$VM_DIR/$VM_NAME.iso" \
+          --os-variant "$VARIANT" \
+          --network bridge=br0,model=virtio \
+          --graphics vnc,listen=0.0.0.0 \
+          --noautoconsole
 
-        log SUCCESS "Windows VM created!"
-        log WARN "Use VNC viewer to complete installation"
+        print_status "SUCCESS" "VM $VM_NAME created (Windows: $NAME)"
         exit 0
+
+    else
+        print_status "ERROR" "Unsupported OS type: $TYPE"
+        exit 1
     fi
 }
 
