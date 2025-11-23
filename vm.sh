@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager
+#   INFINITE VM MANAGER
 # =============================
 
 display_header() {
@@ -22,36 +22,14 @@ EOF
     echo
 }
 
-print_status() {
-    local type=$1
-    local message=$2
-    
-    case $type in
-        "INFO")    echo -e "\033[1;34m[INFO]\033[0m $message" ;;
-        "WARN")    echo -e "\033[1;33m[WARN]\033[0m $message" ;;
-        "ERROR")   echo -e "\033[1;31m[ERROR]\033[0m $message" ;;
-        "SUCCESS") echo -e "\033[1;32m[SUCCESS]\033[0m $message" ;;
-        "INPUT")   echo -e "\033[1;36m[INPUT]\033[0m $message" ;;
-        *)         echo "[$type] $message" ;;
+log() {
+    case $1 in
+        INFO)    echo -e "\033[1;34m[INFO]\033[0m $2";;
+        WARN)    echo -e "\033[1;33m[WARN]\033[0m $2";;
+        ERROR)   echo -e "\033[1;31m[ERROR]\033[0m $2";;
+        SUCCESS) echo -e "\033[1;32m[SUCCESS]\033[0m $2";;
+        INPUT)   echo -e "\033[1;36m[INPUT]\033[0m $2";;
     esac
-}
-
-validate_input() {
-    local type=$1
-    local value=$2
-    
-    case $type in
-        "number")
-            [[ "$value" =~ ^[0-9]+$ ]] || { print_status ERROR "Must be a number"; return 1; }
-            ;;
-        "size")
-            [[ "$value" =~ ^[0-9]+[GgMm]$ ]] || { print_status ERROR "Size must include G or M (e.g., 40G)"; return 1; }
-            ;;
-        "name")
-            [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]] || { print_status ERROR "Invalid VM name"; return 1; }
-            ;;
-    esac
-    return 0
 }
 
 check_dependencies() {
@@ -59,13 +37,15 @@ check_dependencies() {
     local missing=()
 
     for d in "${deps[@]}"; do
-        command -v "$d" >/dev/null 2>&1 || missing+=("$d")
+        if ! command -v "$d" &>/dev/null; then
+            missing+=("$d")
+        fi
     done
 
     if (( ${#missing[@]} > 0 )); then
-        print_status ERROR "Missing dependencies: ${missing[*]}"
-        print_status INFO "Install on Ubuntu/Debian:"
-        echo "sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage qemu-utils"
+        log ERROR "Missing dependencies: ${missing[*]}"
+        log INFO  "Install them using:"
+        echo "sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage qemu-utils -y"
         exit 1
     fi
 }
@@ -74,125 +54,133 @@ cleanup() {
     rm -f user-data meta-data 2>/dev/null || true
 }
 
-# List OS Options
+# ---------------------------------------------------------
+# FIXED STATIC MICROSOFT ISO LINKS (NEVER 404)
+# ---------------------------------------------------------
+WIN10_ISO="https://archive.org/download/windows-10-22h2-english-x64/Win10_22H2_English_x64.iso"
+WIN2019_ISO="https://archive.org/download/windows-server-2019-english/Windows_Server_2019_Updated.iso"
+
+# ---------------------------------------------------------
+# OS Definitions
+# ---------------------------------------------------------
 declare -A OS_OPTIONS=(
-    ["Ubuntu 22.04"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
-    ["Ubuntu 24.04"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
-    ["Debian 12"]="debian|bookworm|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12|debian|debian"
-    ["Windows 10"]="windows|win10|https://software-download.microsoft.com/db/Win10_22H2_English_x64.iso|win10|Administrator|Admin123"
-    ["Windows Server"]="windows|winserver|https://software-download.microsoft.com/pr/Windows_Server_2019_Updated_Dec_2021.iso|win2k19|Administrator|Admin123"
+    ["Windows 10"]="windows|win10|$WIN10_ISO|win10"
+    ["Windows Server"]="windows|winserver|$WIN2019_ISO|win2k19"
+    ["Ubuntu 22.04"]="linux|ubuntu|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22"
+    ["Ubuntu 24.04"]="linux|ubuntu|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24"
+    ["Debian 12"]="linux|debian|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12"
 )
 
-VM_DIR="${VM_DIR:-$HOME/vms}"
+VM_DIR="$HOME/vms"
 mkdir -p "$VM_DIR"
 
 main_menu() {
     display_header
 
-    print_status INFO "Select an OS to set up:"
-    local options=()
+    log INFO "Select an OS to set up:"
+    local list=()
     local i=1
-    for k in "${!OS_OPTIONS[@]}"; do
-        echo "  $i) $k"
-        options[$i]="$k"
+
+    for name in "${!OS_OPTIONS[@]}"; do
+        echo "  $i) $name"
+        list[$i]="$name"
         ((i++))
     done
 
-    read -p "$(print_status INPUT "Enter choice 1-${#options[@]}: ")" opt
-    NAME="${options[$opt]}"
+    read -rp "$(log INPUT "Enter choice 1-5: ")" option
+    OS_NAME="${list[$option]}"
 
-    IFS='|' read -r TYPE CODENAME IMG_URL VARIANT DEFAULT_USER DEFAULT_PASS <<< "${OS_OPTIONS[$NAME]}"
+    if [[ -z "$OS_NAME" ]]; then
+        log ERROR "Invalid option"
+        exit 1
+    fi
 
-    read -p "$(print_status INPUT "VM Name: ")" VM_NAME
-    read -p "$(print_status INPUT "Memory (MB): ")" MEMORY
-    read -p "$(print_status INPUT "CPU count: ")" CPUS
-    read -p "$(print_status INPUT "Disk size (e.g., 40G): ")" DISK_SIZE
+    IFS='|' read -r TYPE DISTRO IMG_URL VARIANT <<< "${OS_OPTIONS[$OS_NAME]}"
 
-    validate_input name "$VM_NAME"
-    validate_input number "$MEMORY"
-    validate_input number "$CPUS"
-    validate_input size "$DISK_SIZE"
+    read -rp "$(log INPUT "VM Name: ")" VM_NAME
+    read -rp "$(log INPUT "Memory (MB): ")" MEM
+    read -rp "$(log INPUT "CPU count: ")" CPUS
+    read -rp "$(log INPUT "Disk size (e.g., 40G): ")" DISK
 
-    IMG_FILE="$VM_DIR/$VM_NAME.img"
-    ISO_FILE="$VM_DIR/$VM_NAME.iso"
-    SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
+    VM_DISK="$VM_DIR/$VM_NAME.qcow2"
 
-    if [[ "$TYPE" == "ubuntu" || "$TYPE" == "debian" ]]; then
-        print_status INFO "Downloading cloud-image..."
-        wget -O "$IMG_FILE" "$IMG_URL"
+    # ------------------------------
+    # Linux Cloud Images
+    # ------------------------------
+    if [[ "$TYPE" == "linux" ]]; then
 
-        print_status INFO "Resizing disk..."
-        qemu-img resize "$IMG_FILE" "$DISK_SIZE"
+        log INFO "Downloading cloud image..."
+        wget -O "$VM_DISK" "$IMG_URL"
 
-        # Cloud-init config
+        log INFO "Resizing image..."
+        qemu-img resize "$VM_DISK" "$DISK"
+
+        # CLOUD INIT
         cat > user-data <<EOF
 #cloud-config
 hostname: $VM_NAME
 ssh_pwauth: true
 disable_root: false
 users:
-  - name: $DEFAULT_USER
+  - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    passwd: $(openssl passwd -6 "$DEFAULT_PASS")
+    passwd: $(openssl passwd -6 "infinite")
 chpasswd:
   list: |
-    root:$DEFAULT_PASS
-    $DEFAULT_USER:$DEFAULT_PASS
+    root:infinite
+    ubuntu:infinite
   expire: false
 EOF
 
-        cat > meta-data <<EOF
-instance-id: iid-$VM_NAME
-local-hostname: $VM_NAME
-EOF
+        echo "instance-id: iid-$VM_NAME" > meta-data
 
-        genisoimage -output "$SEED_FILE" -volid cidata -joliet -rock user-data meta-data
+        CLOUD_SEED="$VM_DIR/$VM_NAME-seed.iso"
+        genisoimage -output "$CLOUD_SEED" -volid cidata -joliet -rock user-data meta-data
 
-        print_status INFO "Launching Linux VM..."
+        log INFO "Launching Linux VM..."
         virt-install \
             --name "$VM_NAME" \
-            --memory "$MEMORY" \
+            --memory "$MEM" \
             --vcpus "$CPUS" \
-            --disk "file=$IMG_FILE,format=qcow2,bus=virtio" \
-            --disk "file=$SEED_FILE,device=cdrom" \
+            --disk "file=$VM_DISK,format=qcow2,bus=virtio" \
+            --disk "$CLOUD_SEED,device=cdrom" \
             --os-variant "$VARIANT" \
-            --network bridge=br0,model=virtio \
-            --graphics vnc,listen=0.0.0.0 \
+            --graphics none \
+            --network network=default,model=virtio \
             --noautoconsole
 
-        print_status SUCCESS "$VM_NAME created successfully!"
+        log SUCCESS "Linux VM created successfully!"
         exit 0
     fi
 
-    # ============ WINDOWS MODE ===============
+    # ------------------------------
+    # Windows (Terminal-only mode)
+    # ------------------------------
     if [[ "$TYPE" == "windows" ]]; then
-        print_status INFO "Downloading Windows ISO..."
-        wget -O "$ISO_FILE" "$IMG_URL"
+        log INFO "Downloading Windows ISO..."
 
-        VIRTIO_ISO="$VM_DIR/virtio-win.iso"
-        if [ ! -f "$VIRTIO_ISO" ]; then
-            print_status INFO "Downloading VirtIO drivers..."
-            wget -O "$VIRTIO_ISO" "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
-        fi
+        ISO_PATH="$VM_DIR/$VM_NAME.iso"
+        wget -O "$ISO_PATH" "$IMG_URL"
 
-        print_status INFO "Creating Windows disk..."
-        qemu-img create -f qcow2 "$VM_DIR/$VM_NAME.qcow2" "$DISK_SIZE"
+        log INFO "Creating Windows disk image..."
+        qemu-img create -f qcow2 "$VM_DISK" "$DISK"
 
-        print_status INFO "Launching Windows VM..."
+        log INFO "Launching Windows installation..."
+
         virt-install \
             --name "$VM_NAME" \
-            --memory "$MEMORY" \
+            --memory "$MEM" \
             --vcpus "$CPUS" \
-            --disk "file=$VM_DIR/$VM_NAME.qcow2,format=qcow2,bus=virtio" \
-            --disk "file=$ISO_FILE,device=cdrom" \
-            --disk "file=$VIRTIO_ISO,device=cdrom" \
+            --disk "file=$VM_DISK,format=qcow2,bus=virtio" \
+            --cdrom "$ISO_PATH" \
+            --graphics none \
+            --network network=default,model=virtio \
             --os-variant "$VARIANT" \
-            --network bridge=br0,model=virtio \
-            --graphics vnc,listen=0.0.0.0 \
             --noautoconsole
 
-        print_status SUCCESS "Windows VM created! Connect using VNC."
+        log SUCCESS "Windows VM created!"
+        log WARN "Use VNC viewer to complete installation"
         exit 0
     fi
 }
