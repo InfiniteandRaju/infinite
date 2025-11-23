@@ -27,12 +27,12 @@ print_status() {
     local message=$2
     
     case $type in
-        "INFO")    echo -e "\033[1;34m[INFO]\033[0m $message"    ;;
-        "WARN")    echo -e "\033[1;33m[WARN]\033[0m $message"    ;;
-        "ERROR")   echo -e "\033[1;31m[ERROR]\033[0m $message"   ;;
+        "INFO")    echo -e "\033[1;34m[INFO]\033[0m $message" ;;
+        "WARN")    echo -e "\033[1;33m[WARN]\033[0m $message" ;;
+        "ERROR")   echo -e "\033[1;31m[ERROR]\033[0m $message" ;;
         "SUCCESS") echo -e "\033[1;32m[SUCCESS]\033[0m $message" ;;
-        "INPUT")   echo -e "\033[1;36m[INPUT]\033[0m $message"   ;;
-        *)         echo "[$type] $message"                       ;;
+        "INPUT")   echo -e "\033[1;36m[INPUT]\033[0m $message" ;;
+        *)         echo "[$type] $message" ;;
     esac
 }
 
@@ -42,34 +42,13 @@ validate_input() {
     
     case $type in
         "number")
-            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-                print_status "ERROR" "Must be a number"
-                return 1
-            fi
+            [[ "$value" =~ ^[0-9]+$ ]] || { print_status ERROR "Must be a number"; return 1; }
             ;;
         "size")
-            if ! [[ "$value" =~ ^[0-9]+[GgMm]$ ]]; then
-                print_status "ERROR" "Must be a size with unit (e.g., 100G, 512M)"
-                return 1
-            fi
-            ;;
-        "port")
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 23 ] || [ "$value" -gt 65535 ]; then
-                print_status "ERROR" "Must be a valid port number (23-65535)"
-                return 1
-            fi
+            [[ "$value" =~ ^[0-9]+[GgMm]$ ]] || { print_status ERROR "Size must include G or M (e.g., 40G)"; return 1; }
             ;;
         "name")
-            if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                print_status "ERROR" "VM name can only contain letters, numbers, hyphens, and underscores"
-                return 1
-            fi
-            ;;
-        "username")
-            if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-                print_status "ERROR" "Username must start with a letter or underscore, and contain only letters, numbers, hyphens, and underscores"
-                return 1
-            fi
+            [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]] || { print_status ERROR "Invalid VM name"; return 1; }
             ;;
     esac
     return 0
@@ -77,27 +56,25 @@ validate_input() {
 
 check_dependencies() {
     local deps=("qemu-system-x86_64" "virt-install" "wget" "cloud-localds" "genisoimage" "qemu-img")
-    local missing_deps=()
-    
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            missing_deps+=("$dep")
-        fi
+    local missing=()
+
+    for d in "${deps[@]}"; do
+        command -v "$d" >/dev/null 2>&1 || missing+=("$d")
     done
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
-        print_status "INFO" "On Ubuntu/Debian: sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage"
+
+    if (( ${#missing[@]} > 0 )); then
+        print_status ERROR "Missing dependencies: ${missing[*]}"
+        print_status INFO "Install on Ubuntu/Debian:"
+        echo "sudo apt install qemu-system virt-install wget cloud-image-utils genisoimage qemu-utils"
         exit 1
     fi
 }
 
 cleanup() {
-    if [ -f "user-data" ]; then rm -f "user-data"; fi
-    if [ -f "meta-data" ]; then rm -f "meta-data"; fi
+    rm -f user-data meta-data 2>/dev/null || true
 }
 
-# OS list for menu
+# List OS Options
 declare -A OS_OPTIONS=(
     ["Ubuntu 22.04"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
     ["Ubuntu 24.04"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
@@ -111,64 +88,57 @@ mkdir -p "$VM_DIR"
 
 main_menu() {
     display_header
-    
-    print_status "INFO" "Select an OS to set up:"
+
+    print_status INFO "Select an OS to set up:"
     local options=()
     local i=1
-    for name in "${!OS_OPTIONS[@]}"; do
-        echo "  $i) $name"
-        options[$i]="$name"
+    for k in "${!OS_OPTIONS[@]}"; do
+        echo "  $i) $k"
+        options[$i]="$k"
         ((i++))
     done
 
-    read -p "$(print_status "INPUT" "Enter choice 1-${#options[@]}: ")" opt
-    if ! [[ "$opt" =~ ^[0-9]+$ ]] || [ "$opt" -lt 1 ] || [ "$opt" -gt ${#options[@]} ]; then
-        print_status "ERROR" "Invalid option"
-        exit 1
-    fi
-
+    read -p "$(print_status INPUT "Enter choice 1-${#options[@]}: ")" opt
     NAME="${options[$opt]}"
+
     IFS='|' read -r TYPE CODENAME IMG_URL VARIANT DEFAULT_USER DEFAULT_PASS <<< "${OS_OPTIONS[$NAME]}"
 
-    # Ask for VM specifics
-    read -p "$(print_status "INPUT" "VM Name: ")" VM_NAME
-    read -p "$(print_status "INPUT" "Memory in MB (e.g., 2048): ")" MEMORY
-    read -p "$(print_status "INPUT" "CPU count (e.g., 2): ")" CPUS
-    read -p "$(print_status "INPUT" "Disk size (e.g., 20G): ")" DISK_SIZE
+    read -p "$(print_status INPUT "VM Name: ")" VM_NAME
+    read -p "$(print_status INPUT "Memory (MB): ")" MEMORY
+    read -p "$(print_status INPUT "CPU count: ")" CPUS
+    read -p "$(print_status INPUT "Disk size (e.g., 40G): ")" DISK_SIZE
 
-    validate_input number "$MEMORY" || exit 1
-    validate_input number "$CPUS"    || exit 1
-    validate_input size   "$DISK_SIZE"|| exit 1
-    validate_input name   "$VM_NAME"  || exit 1
+    validate_input name "$VM_NAME"
+    validate_input number "$MEMORY"
+    validate_input number "$CPUS"
+    validate_input size "$DISK_SIZE"
 
     IMG_FILE="$VM_DIR/$VM_NAME.img"
+    ISO_FILE="$VM_DIR/$VM_NAME.iso"
     SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
-    CREATED="$(date)"
 
     if [[ "$TYPE" == "ubuntu" || "$TYPE" == "debian" ]]; then
-        # linux cloud-image path
-        print_status "INFO" "Using cloud-image: $IMG_URL"
+        print_status INFO "Downloading cloud-image..."
         wget -O "$IMG_FILE" "$IMG_URL"
 
-        # resize
-        print_status "INFO" "Resizing disk image to $DISK_SIZE"
+        print_status INFO "Resizing disk..."
         qemu-img resize "$IMG_FILE" "$DISK_SIZE"
 
-        # create seed
+        # Cloud-init config
         cat > user-data <<EOF
 #cloud-config
 hostname: $VM_NAME
 ssh_pwauth: true
 disable_root: false
 users:
-  - name: ${DEFAULT_USER}
+  - name: $DEFAULT_USER
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
     passwd: $(openssl passwd -6 "$DEFAULT_PASS")
 chpasswd:
   list: |
     root:$DEFAULT_PASS
-    ${DEFAULT_USER}:$DEFAULT_PASS
+    $DEFAULT_USER:$DEFAULT_PASS
   expire: false
 EOF
 
@@ -179,47 +149,51 @@ EOF
 
         genisoimage -output "$SEED_FILE" -volid cidata -joliet -rock user-data meta-data
 
-        print_status "INFO" "Launching VM (Linux Cloud-Init)"
+        print_status INFO "Launching Linux VM..."
         virt-install \
-          --name "$VM_NAME" \
-          --memory "$MEMORY" \
-          --vcpus "$CPUS" \
-          --disk "file=$IMG_FILE,format=qcow2,bus=virtio" \
-          --disk "file=$SEED_FILE,format=raw,if=virtio,device=cdrom" \
-          --os-variant "$VARIANT" \
-          --network bridge=br0,model=virtio \
-          --graphics vnc,listen=0.0.0.0 \
-          --noautoconsole
+            --name "$VM_NAME" \
+            --memory "$MEMORY" \
+            --vcpus "$CPUS" \
+            --disk "file=$IMG_FILE,format=qcow2,bus=virtio" \
+            --disk "file=$SEED_FILE,device=cdrom" \
+            --os-variant "$VARIANT" \
+            --network bridge=br0,model=virtio \
+            --graphics vnc,listen=0.0.0.0 \
+            --noautoconsole
 
-        print_status "SUCCESS" "VM $VM_NAME created (type: $NAME)"
+        print_status SUCCESS "$VM_NAME created successfully!"
         exit 0
+    fi
 
-    elif [[ "$TYPE" == "windows" ]]; then
-        # Windows path using ISO
-        print_status "INFO" "Using ISO: $IMG_URL"
-        ISO_PATH="$IMG_URL"
-        VIRTIO_ISO="$IMAGES/virtio-win.iso"  # ensure you have this
+    # ============ WINDOWS MODE ===============
+    if [[ "$TYPE" == "windows" ]]; then
+        print_status INFO "Downloading Windows ISO..."
+        wget -O "$ISO_FILE" "$IMG_URL"
 
-        print_status "INFO" "Launching VM (Windows)"
+        VIRTIO_ISO="$VM_DIR/virtio-win.iso"
+        if [ ! -f "$VIRTIO_ISO" ]; then
+            print_status INFO "Downloading VirtIO drivers..."
+            wget -O "$VIRTIO_ISO" "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso"
+        fi
+
+        print_status INFO "Creating Windows disk..."
+        qemu-img create -f qcow2 "$VM_DIR/$VM_NAME.qcow2" "$DISK_SIZE"
+
+        print_status INFO "Launching Windows VM..."
         virt-install \
-          --name "$VM_NAME" \
-          --memory "$MEMORY" \
-          --vcpus "$CPUS" \
-          --disk "file=$VM_DIR/$VM_NAME.qcow2,format=qcow2,bus=virtio" \
-          --cdrom "$ISO_PATH" \
-          --disk "file=$VIRTIO_ISO,device=cdrom" \
-          --os-variant "$VARIANT" \
-          --network bridge=br0,model=virtio \
-          --graphics vnc,listen=0.0.0.0 \
-          --noautoconsole
+            --name "$VM_NAME" \
+            --memory "$MEMORY" \
+            --vcpus "$CPUS" \
+            --disk "file=$VM_DIR/$VM_NAME.qcow2,format=qcow2,bus=virtio" \
+            --disk "file=$ISO_FILE,device=cdrom" \
+            --disk "file=$VIRTIO_ISO,device=cdrom" \
+            --os-variant "$VARIANT" \
+            --network bridge=br0,model=virtio \
+            --graphics vnc,listen=0.0.0.0 \
+            --noautoconsole
 
-        print_status "SUCCESS" "VM $VM_NAME created (Windows: $NAME)"
-        print_status "WARN" "During Windows setup: click 'Load Driver' and point to VirtIO drivers from CD."
+        print_status SUCCESS "Windows VM created! Connect using VNC."
         exit 0
-
-    else
-        print_status "ERROR" "Unsupported OS type: $TYPE"
-        exit 1
     fi
 }
 
